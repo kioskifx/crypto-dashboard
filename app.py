@@ -66,13 +66,6 @@ dates_all = np.array([_today - timedelta(days=x) for x in range(LOOKBACK - 1, -1
 def build_market_factor(n):
     """
     Regime-structured daily market factor (index 0 = oldest, n-1 = today).
-    With LOOKBACK=90 and today=Mar 18 2026:
-      0–36  : mild bear / chop
-      37–51 : CRASH (Jan 25 – Feb 8)
-      52–74 : recovery
-      75–83 : chop
-      84–88 : pre-surge
-      89    : today — forced +8.5% (strong up-day, matches P1D histogram)
     """
     regimes = [
         (37,  -0.004, 0.016),
@@ -109,9 +102,6 @@ price_all = np.cumprod(1 + ret_all, axis=0)  # (LOOKBACK, N_COINS)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── 4a · Return Histograms (P1D and P1W) ─────────────────────────────────────
-# Bins: 8 buckets excluding the -5% to +5% flat zone.
-# today_ret   = ret_all[-1]          (N_COINS,)  single-day returns
-# week_ret    = price[-1]/price[-6]  (N_COINS,)  5-day compounded returns
 _EDGES  = np.array([-0.20, -0.15, -0.10, -0.05, 0.05, 0.10, 0.15, 0.20])
 _LABELS = ['-20%', '-15%', '-10%', '-5%', '5%', '10%', '15%', '20%']
 
@@ -128,9 +118,6 @@ df_p1w = return_hist(week_ret)
 
 
 # ── 4b · Sector Z-Scores (P1D and P1W) ───────────────────────────────────────
-# For each sector: compute mean return for the period (today or this week).
-# Z-score that mean against the sector's own 60-day daily mean distribution.
-# → Positive Z means sector is outperforming its historical norm.
 ZSCORE_WIN = 60
 
 def sector_zscore(coin_ret_now, coin_ret_hist):
@@ -157,23 +144,31 @@ df_zp1w = sector_zscore(week_ret,  hist_w)
 
 
 # ── 4c · Setups P1W ───────────────────────────────────────────────────────────
-# Pattern detection on the price matrix.
-# Each setup is a binary flag per coin; counts are aggregated across the universe.
-# Bullish setups → positive count, bearish setups → negative count.
 def compute_setups(pm, rm, window=20):
     p0      = pm[-1]
     p1      = pm[-2]
+    
+    # Current 20-day extremes (ending yesterday)
     high20  = pm[-window-1:-1].max(axis=0)
     low20   = pm[-window-1:-1].min(axis=0)
     range20 = (high20 / np.maximum(low20, 1e-9)) - 1
-    trend5  = rm[-5:].sum(axis=0)
+    
+    # True 5-day trend using price boundaries
+    trend5  = (pm[-1] / np.maximum(pm[-6], 1e-9)) - 1
     ret_d   = rm[-1]
-    in_bo5  = pm[-6:-1].max(axis=0) > high20
-    in_bd5  = pm[-6:-1].min(axis=0) < low20
+    
+    # Prior 20-day extremes (ending 6 days ago) to prevent overlap
+    high20_prior = pm[-window-6:-6].max(axis=0)
+    low20_prior  = pm[-window-6:-6].min(axis=0)
+    
+    in_bo5  = pm[-6:-1].max(axis=0) > high20_prior
+    in_bd5  = pm[-6:-1].min(axis=0) < low20_prior
+    
     pfl     = (p0 - low20) / np.maximum(low20, 1e-9)
 
-    breakout   = (p0 > high20) & (p1 <= high20)
-    breakdown  = (p0 < low20)  & (p1 >= low20)
+    breakout   = (p0 > high20)
+    breakdown  = (p0 < low20)
+    
     contd_bo   = in_bo5 & (trend5 > 0) & ~breakout
     contd_sh   = in_bd5 & (trend5 < 0) & ~breakdown
     bot_bounce = (pfl < 0.05) & (p0 > p1)
@@ -201,11 +196,7 @@ DISPLAY  = 60
 d_dates  = dates_all[-DISPLAY:]
 d_ret    = ret_all[-DISPLAY:]   # (60, N_COINS)
 
-# PRIMARY: 25 highest-beta coins, ±5% daily threshold
-# up5_p[d] = # of primary coins with daily return > +5% on day d
-# dn5_p[d] = # of primary coins with daily return < -5% on day d
-# ratio_Nd  = rolling N-day sum(up5) / sum(dn5)  → conviction measure
-# osc_p     = up5 - dn5                          → net movers per day
+# PRIMARY
 up5_p = (d_ret[:, primary_idx] >  0.05).sum(axis=1).astype(float)
 dn5_p = (d_ret[:, primary_idx] < -0.05).sum(axis=1).astype(float)
 
@@ -221,26 +212,20 @@ ratio_2d    = rolling_ratio(up5_p, dn5_p, 2)
 ratio_5d    = rolling_ratio(up5_p, dn5_p, 5)
 osc_primary = up5_p - dn5_p
 
-# SECONDARY: full 289-coin universe, per-coin 1σ weekly threshold
-# coin_weekly_sigma[c] = std of 5-day returns across the PRE-CRASH window (days 0-36)
-# Using pre-crash vol as baseline so thresholds reflect "normal" conditions.
-# Each day d: compute each coin's rolling 5-day return.
-# up_1s = # coins above +1σ, dn_1s = # coins below -1σ
-# osc_secondary = (up_1s - dn_1s) / N_COINS × 100  → scaled ±100
+# SECONDARY (Fully Vectorized)
 pre_crash_wk = np.array([
     (price_all[i] / price_all[i-5]) - 1
     for i in range(5, 37)
-])  # (32, N_COINS)
-coin_weekly_sigma = pre_crash_wk.std(axis=0)  # (N_COINS,)
+])
+coin_weekly_sigma = pre_crash_wk.std(axis=0)
 
-osc_secondary = np.zeros(DISPLAY)
-for d in range(DISPLAY):
-    pm_idx = (LOOKBACK - DISPLAY) + d
-    if pm_idx >= 5:
-        w_ret = (price_all[pm_idx] / price_all[pm_idx-5]) - 1
-        up_1s = (w_ret >  coin_weekly_sigma).sum()
-        dn_1s = (w_ret < -coin_weekly_sigma).sum()
-        osc_secondary[d] = (up_1s - dn_1s) / N_COINS * 100
+pm_idx_start = LOOKBACK - DISPLAY
+# 60x289 matrix of rolling 5-day returns
+w_ret_matrix = (price_all[pm_idx_start:] / price_all[pm_idx_start-5 : LOOKBACK-5]) - 1
+
+up_1s_arr = (w_ret_matrix > coin_weekly_sigma).sum(axis=1)
+dn_1s_arr = (w_ret_matrix < -coin_weekly_sigma).sum(axis=1)
+osc_secondary = (up_1s_arr - dn_1s_arr) / N_COINS * 100
 
 df_ts = pd.DataFrame({
     'Date':          d_dates,
@@ -252,8 +237,6 @@ df_ts = pd.DataFrame({
 
 
 # ── 4e · Calendar Heatmap ─────────────────────────────────────────────────────
-# Cell value = median coin return for that day (from ret_all within LOOKBACK,
-# plausible noise for dates older than LOOKBACK, NaN for future dates).
 daily_median = np.median(ret_all, axis=1)  # (LOOKBACK,)
 
 year       = _today.year
@@ -367,7 +350,6 @@ st.markdown("<p style='text-align:center;font-weight:bold;'>Daily Performance He
 
 n_weeks  = int(df_cal['week_col'].max()) + 1
 
-# Two separate matrices: past (coloured) and future (dark placeholder)
 z_past   = np.full((7, n_weeks), np.nan)
 z_future = np.full((7, n_weeks), np.nan)
 text_cal = np.full((7, n_weeks), '', dtype=object)
@@ -383,7 +365,7 @@ for _, row in df_cal.iterrows():
 MNAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 month_spans = df_cal.groupby('month')['week_col'].agg(['min','max'])
 
-# Month label annotations (centred over each month's column span)
+# Month label annotations
 annotations = [
     dict(x=(sp['min']+sp['max'])/2, y=1.08, xref='x', yref='paper',
          text=f"<b>{MNAMES[m-1]}</b>", showarrow=False,
@@ -391,25 +373,28 @@ annotations = [
     for m, sp in month_spans.iterrows()
 ]
 
-# Month separator vertical lines — drawn at the left edge of the first column
-# of every month (except January which is the start).
-# x position in heatmap pixel space: col - 0.5 puts the line between columns.
+# Step-stair month separators using SVG paths
 month_separators = []
-for m, sp in month_spans.iterrows():
-    if m == df_cal['month'].min():
-        continue   # no line before first month
-    x_sep = sp['min'] - 0.5
+month_starts = df_cal.drop_duplicates(subset=['month'], keep='first')
+
+for _, row in month_starts.iterrows():
+    if row['month'] == df_cal['month'].min():
+        continue
+    
+    w = row['week_col']
+    d = row['dow']
+
+    path = f"M {w - 0.5}, 6.5 L {w - 0.5}, {d - 0.5} L {w + 0.5}, {d - 0.5} L {w + 0.5}, -0.5"
+
     month_separators.append(dict(
-        type='line',
-        x0=x_sep, x1=x_sep,
-        y0=-0.5,  y1=6.5,
-        xref='x', yref='y',
-        line=dict(color='#555555', width=1.5),
+        type='path',
+        path=path,
+        line=dict(color='#888888', width=2),
     ))
 
 fig_cal = go.Figure()
 
-# Layer 1: future cells — flat dark grey
+# Layer 1: future cells
 fig_cal.add_trace(go.Heatmap(
     z=z_future,
     x=list(range(n_weeks)), y=list(range(7)),
@@ -420,7 +405,7 @@ fig_cal.add_trace(go.Heatmap(
     zmin=0, zmax=1, hoverinfo='none',
 ))
 
-# Layer 2: past cells — coloured by return magnitude
+# Layer 2: past cells
 fig_cal.add_trace(go.Heatmap(
     z=z_past,
     x=list(range(n_weeks)), y=list(range(7)),
