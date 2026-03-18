@@ -44,18 +44,82 @@ def gen_setups():
         'Count': [-9, -7, -1, 6, 29, 30]
     })
 
-def gen_timeseries(days=120):
+def gen_timeseries():
+    """
+    Simulate realistic breadth data.
+
+    Primary ratio/oscillator  → small effective universe (~25 coins clearing 5% daily)
+    Secondary oscillator      → large universe (~200 coins clearing 1σ weekly)
+
+    Market regimes baked in (relative to today = Mar 18):
+      - Days 0-6   : mild bear  (Jan 18-24)
+      - Days 7-21  : crash      (Jan 25 – Feb 8)   ← the big negative spike
+      - Days 22-44 : recovery   (Feb 9 – Mar 2)
+      - Days 45-56 : choppy     (Mar 3 – Mar 14)
+      - Days 57-59 : surge      (Mar 15-18)         ← ratio spike at right edge
+    """
+    days  = 60          # ~Jan 18 → Mar 18
     dates = [_today - timedelta(days=x) for x in range(days - 1, -1, -1)]
-    v2d   = np.random.uniform(0.5, 2.5, days) + np.sin(np.linspace(0, 12, days)) * 0.5
-    v5d   = np.random.uniform(0.3, 1.5, days) + np.sin(np.linspace(0, 12, days)) * 0.3
-    v2d[-1], v5d[-1] = 10.0, 5.0          # today's spike visible in screenshot
 
-    osc_p = np.random.uniform(-8, 8, days)
-    osc_s = np.random.uniform(-15, 15, days)
-    osc_s[15:25] = np.random.uniform(-90, -50, 10)   # Feb crash (arrow in screenshot)
+    # ── regime probabilities (p_up, p_dn) per day for PRIMARY universe ──────────
+    N_P = 25            # effective coins clearing 5%+ daily threshold
+    p_up_p = np.where(np.arange(days) < 7,   0.28,
+             np.where(np.arange(days) < 22,  0.04,
+             np.where(np.arange(days) < 45,  0.38,
+             np.where(np.arange(days) < 57,  0.30, 0.82))))
 
-    return pd.DataFrame({'Date': dates, '2_day': v2d, '5_day': v5d,
-                         'Osc_Primary': osc_p, 'Osc_Secondary': osc_s})
+    p_dn_p = np.where(np.arange(days) < 7,   0.28,
+             np.where(np.arange(days) < 22,  0.60,
+             np.where(np.arange(days) < 45,  0.14,
+             np.where(np.arange(days) < 57,  0.22, 0.04))))
+
+    # Add per-day noise so every day looks slightly different
+    rng_up = np.clip(p_up_p + np.random.uniform(-0.05, 0.05, days), 0.02, 0.95)
+    rng_dn = np.clip(p_dn_p + np.random.uniform(-0.05, 0.05, days), 0.02, 0.95)
+
+    # Simulate daily up/down counts
+    up_p = np.array([np.random.binomial(N_P, p) for p in rng_up], dtype=float)
+    dn_p = np.array([np.random.binomial(N_P, p) for p in rng_dn], dtype=float)
+
+    # Rolling ratios  (2-day and 5-day windows)
+    v2d = np.array([
+        up_p[max(0, i-1):i+1].sum() / max(dn_p[max(0, i-1):i+1].sum(), 0.5)
+        for i in range(days)
+    ])
+    v5d = np.array([
+        up_p[max(0, i-4):i+1].sum() / max(dn_p[max(0, i-4):i+1].sum(), 0.5)
+        for i in range(days)
+    ])
+
+    # Primary oscillator = net count
+    osc_p = up_p - dn_p
+
+    # ── SECONDARY universe: 1σ weekly movers, ~200 coins ──────────────────────
+    N_S = 200
+    p_up_s = np.where(np.arange(days) < 7,   0.15,
+             np.where(np.arange(days) < 22,  0.03,
+             np.where(np.arange(days) < 45,  0.20,
+             np.where(np.arange(days) < 57,  0.14, 0.26))))
+
+    p_dn_s = np.where(np.arange(days) < 7,   0.15,
+             np.where(np.arange(days) < 22,  0.65,
+             np.where(np.arange(days) < 45,  0.10,
+             np.where(np.arange(days) < 57,  0.14, 0.06))))
+
+    rng_up_s = np.clip(p_up_s + np.random.uniform(-0.03, 0.03, days), 0.01, 0.95)
+    rng_dn_s = np.clip(p_dn_s + np.random.uniform(-0.03, 0.03, days), 0.01, 0.95)
+
+    up_s = np.array([np.random.binomial(N_S, p) for p in rng_up_s], dtype=float)
+    dn_s = np.array([np.random.binomial(N_S, p) for p in rng_dn_s], dtype=float)
+    osc_s = up_s - dn_s
+
+    return pd.DataFrame({
+        'Date':          dates,
+        '2_day':         v2d,
+        '5_day':         v5d,
+        'Osc_Primary':   osc_p,
+        'Osc_Secondary': osc_s,
+    })
 
 def gen_calendar():
     """Full-year calendar grid: 7 rows (Mon–Sun) × ~54 week columns."""
