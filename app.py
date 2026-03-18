@@ -264,6 +264,7 @@ first_mon  = year_dates[0] - timedelta(days=year_dates[0].dayofweek)
 cal_rows = []
 for yr_d in year_dates:
     days_ago = (today_date - yr_d.date()).days
+    is_future = days_ago < 0
     if 0 <= days_ago < LOOKBACK:
         val = float(daily_median[LOOKBACK - 1 - days_ago])
     elif days_ago >= LOOKBACK:
@@ -276,6 +277,7 @@ for yr_d in year_dates:
         'month':    yr_d.month,
         'week_col': (yr_d.date() - first_mon.date()).days // 7,
         'val':      val,
+        'future':   is_future,
     })
 df_cal = pd.DataFrame(cal_rows)
 
@@ -364,38 +366,85 @@ st.markdown("<p style='text-align:center;font-weight:bold;'>Daily Performance He
             unsafe_allow_html=True)
 
 n_weeks  = int(df_cal['week_col'].max()) + 1
-z_cal    = np.full((7, n_weeks), np.nan)
+
+# Two separate matrices: past (coloured) and future (dark placeholder)
+z_past   = np.full((7, n_weeks), np.nan)
+z_future = np.full((7, n_weeks), np.nan)
 text_cal = np.full((7, n_weeks), '', dtype=object)
 
 for _, row in df_cal.iterrows():
     r, c = int(row['dow']), int(row['week_col'])
-    z_cal[r, c]    = row['val']
     text_cal[r, c] = str(int(row['day']))
+    if row['future']:
+        z_future[r, c] = 0.0          # constant → flat dark colour
+    else:
+        z_past[r, c] = row['val']
 
 MNAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 month_spans = df_cal.groupby('month')['week_col'].agg(['min','max'])
+
+# Month label annotations (centred over each month's column span)
 annotations = [
-    dict(x=(sp['min']+sp['max'])/2, y=1.10, xref='x', yref='paper',
+    dict(x=(sp['min']+sp['max'])/2, y=1.08, xref='x', yref='paper',
          text=f"<b>{MNAMES[m-1]}</b>", showarrow=False,
-         font=dict(size=10), xanchor='center')
+         font=dict(size=11, color='#cccccc'), xanchor='center')
     for m, sp in month_spans.iterrows()
 ]
 
-fig_cal = go.Figure(go.Heatmap(
-    z=z_cal, x=list(range(n_weeks)), y=list(range(7)),
+# Month separator vertical lines — drawn at the left edge of the first column
+# of every month (except January which is the start).
+# x position in heatmap pixel space: col - 0.5 puts the line between columns.
+month_separators = []
+for m, sp in month_spans.iterrows():
+    if m == df_cal['month'].min():
+        continue   # no line before first month
+    x_sep = sp['min'] - 0.5
+    month_separators.append(dict(
+        type='line',
+        x0=x_sep, x1=x_sep,
+        y0=-0.5,  y1=6.5,
+        xref='x', yref='y',
+        line=dict(color='#555555', width=1.5),
+    ))
+
+fig_cal = go.Figure()
+
+# Layer 1: future cells — flat dark grey
+fig_cal.add_trace(go.Heatmap(
+    z=z_future,
+    x=list(range(n_weeks)), y=list(range(7)),
     text=text_cal, texttemplate="%{text}",
-    textfont={"size": 9, "color": "black"},
-    colorscale=[[0, COLOR_NEG], [0.5, '#f0f0f0'], [1, COLOR_POS]],
+    textfont={"size": 9, "color": "#666666"},
+    colorscale=[[0, '#2a2a2a'], [1, '#2a2a2a']],
+    showscale=False, xgap=3, ygap=3,
+    zmin=0, zmax=1, hoverinfo='none',
+))
+
+# Layer 2: past cells — coloured by return magnitude
+fig_cal.add_trace(go.Heatmap(
+    z=z_past,
+    x=list(range(n_weeks)), y=list(range(7)),
+    text=text_cal, texttemplate="%{text}",
+    textfont={"size": 9, "color": "#111111"},
+    colorscale=[[0, COLOR_NEG], [0.5, '#e8e8e8'], [1, COLOR_POS]],
     showscale=False, xgap=3, ygap=3,
     zmin=-0.05, zmax=0.05, hoverinfo='none',
 ))
+
 fig_cal.update_layout(
-    height=240, margin=dict(l=35, r=10, t=45, b=10),
-    yaxis=dict(ticktext=['M','T','W','T','F','S','S'], tickvals=list(range(7)),
-               autorange='reversed', showgrid=False, zeroline=False,
-               tickfont=dict(size=10)),
-    xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
+    height=250,
+    margin=dict(l=35, r=10, t=50, b=10),
+    paper_bgcolor='#111111',
+    plot_bgcolor='#111111',
+    yaxis=dict(
+        ticktext=['M','T','W','T','F','S','S'],
+        tickvals=list(range(7)),
+        autorange='reversed', showgrid=False, zeroline=False,
+        tickfont=dict(size=10, color='#aaaaaa'),
+    ),
+    xaxis=dict(showticklabels=False, showgrid=False, zeroline=False,
+               range=[-0.5, n_weeks - 0.5]),
     annotations=annotations,
-    paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+    shapes=month_separators,
 )
 st.plotly_chart(fig_cal, use_container_width=True, config={'displayModeBar': False})
