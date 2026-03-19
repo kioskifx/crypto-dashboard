@@ -490,10 +490,10 @@ for col, series, color, title, ma_label in [
         above = np.where(series >= 50, series, 50.0)
         below = np.where(series <= 50, series, 50.0)
         fig.add_trace(go.Scatter(
-            x=d_dates, y=above, fill='tozeroy', fillcolor=f'{COLOR_POS}44',
+            x=d_dates, y=above, fill='tozeroy', fillcolor='rgba(165,214,247,0.25)',
             line=dict(width=0), showlegend=False, hoverinfo='skip'))
         fig.add_trace(go.Scatter(
-            x=d_dates, y=below, fill='tozeroy', fillcolor=f'{COLOR_NEG}44',
+            x=d_dates, y=below, fill='tozeroy', fillcolor='rgba(246,185,149,0.25)',
             line=dict(width=0), showlegend=False, hoverinfo='skip'))
         # Main line
         fig.add_trace(go.Scatter(
