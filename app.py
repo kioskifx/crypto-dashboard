@@ -24,68 +24,57 @@ np.random.seed(_today.day)
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2 — COIN UNIVERSE
 # ═══════════════════════════════════════════════════════════════════════════════
-# (sector_name, n_coins, market_beta)
 SECTOR_DEF = [
-    ('MEME',    30, 1.80),
-    ('L1',      20, 1.00),
-    ('DINO',    18, 0.70),
-    ('AI',      25, 1.40),
-    ('LST',     12, 0.90),
-    ('NEW',     15, 1.20),
-    ('CEXDEX',  15, 1.10),
-    ('L2',      18, 1.20),
-    ('NFT',     15, 1.50),
-    ('NAR',     10, 0.80),
-    ('DEFI',    20, 1.30),
-    ('GAMING',  18, 1.60),
-    ('DEPIN',   12, 1.30),
-    ('PRIVACY', 10, 1.10),
-    ('AGENTS',  18, 1.50),
-    ('INFRA',   15, 1.10),
-    ('DWF',      8, 1.00),
-    ('INFOFI',  10, 1.20),
+    ('MEME',    30, 1.80), ('L1',      20, 1.00), ('DINO',    18, 0.70),
+    ('AI',      25, 1.40), ('LST',     12, 0.90), ('NEW',     15, 1.20),
+    ('CEXDEX',  15, 1.10), ('L2',      18, 1.20), ('NFT',     15, 1.50),
+    ('NAR',     10, 0.80), ('DEFI',    20, 1.30), ('GAMING',  18, 1.60),
+    ('DEPIN',   12, 1.30), ('PRIVACY', 10, 1.10), ('AGENTS',  18, 1.50),
+    ('INFRA',   15, 1.10), ('DWF',      8, 1.00), ('INFOFI',  10, 1.20),
 ]
 SECTORS      = [d[0] for d in SECTOR_DEF]
 coin_sectors = np.array([s for name, n, _ in SECTOR_DEF for s in [name] * n])
 coin_betas   = np.array([b for name, n, b in SECTOR_DEF for _ in range(n)])
 N_COINS      = len(coin_sectors)  # 289
 
-# Per-coin idiosyncratic daily volatility (sampled once, stable across charts)
 coin_idio_vol = np.random.uniform(0.020, 0.055, N_COINS)
-
-# Primary breadth universe: 25 highest-beta coins
-primary_idx = np.argsort(coin_betas)[-25:]
+primary_idx   = np.argsort(coin_betas)[-25:]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3 — SINGLE RETURN MATRIX  (all charts derive from this)
+# 3 — SHORT RETURN MATRIX  (90 days — basis for Row 1 charts)
 # ═══════════════════════════════════════════════════════════════════════════════
-LOOKBACK = 90
+LOOKBACK  = 90
+DISPLAY   = 60
 dates_all = np.array([_today - timedelta(days=x) for x in range(LOOKBACK - 1, -1, -1)])
 
-def build_market_factor(n):
+def build_market_factor(n, crash_offset=52):
     """
-    Regime-structured daily market factor (index 0 = oldest, n-1 = today).
+    Regime-structured daily market factor.
+    crash_offset = how many days before today the crash STARTS.
+    Crash duration = 15 days.
     """
+    cs = n - crash_offset          # crash start index
+    ce = cs + 15                   # crash end index
     regimes = [
-        (37,  -0.004, 0.016),
-        (52,  -0.025, 0.030),
-        (75,  +0.009, 0.018),
-        (84,  +0.002, 0.021),
-        (n-1, +0.030, 0.020),
+        (cs,   -0.004, 0.016),     # mild bear leading into crash
+        (ce,   -0.025, 0.030),     # CRASH
+        (ce+23,+0.009, 0.018),     # recovery
+        (ce+32,+0.002, 0.021),     # chop
+        (n-1,  +0.030, 0.020),     # surge
     ]
     f, i = np.zeros(n), 0
     for end, mu, sigma in regimes:
+        end = min(end, n - 1)
         while i < end:
             f[i] = np.random.normal(mu, sigma)
             i += 1
-    f[-1] = 0.085   # today: hard +8.5%
+    f[-1] = 0.085   # today: forced +8.5%
     return f
 
 mkt_factor   = build_market_factor(LOOKBACK)
 sector_drift = {s: np.random.normal(0, 0.003, LOOKBACK) for s in SECTORS}
 
-# ret_all[day, coin] = beta * market_factor[day] + sector_drift[day] + idio_noise
 ret_all = np.zeros((LOOKBACK, N_COINS))
 for c in range(N_COINS):
     sec = coin_sectors[c]
@@ -93,15 +82,12 @@ for c in range(N_COINS):
                      + sector_drift[sec]
                      + np.random.normal(0, coin_idio_vol[c], LOOKBACK))
 
-# Compounded price index per coin, starts at 1.0
-price_all = np.cumprod(1 + ret_all, axis=0)  # (LOOKBACK, N_COINS)
+price_all = np.cumprod(1 + ret_all, axis=0)   # (90, 289)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4 — DERIVED STATS
+# 4a — RETURN HISTOGRAMS
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# ── 4a · Return Histograms (P1D and P1W) ─────────────────────────────────────
 _EDGES  = np.array([-0.20, -0.15, -0.10, -0.05, 0.05, 0.10, 0.15, 0.20])
 _LABELS = ['-20%', '-15%', '-10%', '-5%', '5%', '10%', '15%', '20%']
 
@@ -117,7 +103,9 @@ df_p1d = return_hist(today_ret)
 df_p1w = return_hist(week_ret)
 
 
-# ── 4b · Sector Z-Scores (P1D and P1W) ───────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4b — SECTOR Z-SCORES
+# ═══════════════════════════════════════════════════════════════════════════════
 ZSCORE_WIN = 60
 
 def sector_zscore(coin_ret_now, coin_ret_hist):
@@ -129,46 +117,31 @@ def sector_zscore(coin_ret_now, coin_ret_hist):
         mu, sigma  = hist_means.mean(), hist_means.std()
         z = (now_mean - mu) / max(float(sigma), 1e-9)
         rows.append({'Sector': sec, 'Z-Score': round(z, 2)})
-    return (pd.DataFrame(rows)
-              .sort_values('Z-Score', ascending=True)
-              .reset_index(drop=True))
+    return pd.DataFrame(rows).sort_values('Z-Score', ascending=True).reset_index(drop=True)
 
-hist_d = ret_all[-ZSCORE_WIN-1:-1]  # 60 daily returns excluding today
-hist_w = np.array([                 # 60 rolling 5-day returns
-    (price_all[-ZSCORE_WIN-1+i] / price_all[-ZSCORE_WIN-6+i]) - 1
-    for i in range(ZSCORE_WIN)
-])
-
+hist_d  = ret_all[-ZSCORE_WIN-1:-1]
+hist_w  = np.array([(price_all[-ZSCORE_WIN-1+i] / price_all[-ZSCORE_WIN-6+i]) - 1
+                     for i in range(ZSCORE_WIN)])
 df_zp1d = sector_zscore(today_ret, hist_d)
 df_zp1w = sector_zscore(week_ret,  hist_w)
 
 
-# ── 4c · Setups P1W ───────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4c — SETUPS
+# ═══════════════════════════════════════════════════════════════════════════════
 def compute_setups(pm, rm, window=20):
-    p0      = pm[-1]
-    p1      = pm[-2]
-    
-    # Current 20-day extremes (ending yesterday)
+    p0, p1  = pm[-1], pm[-2]
     high20  = pm[-window-1:-1].max(axis=0)
     low20   = pm[-window-1:-1].min(axis=0)
     range20 = (high20 / np.maximum(low20, 1e-9)) - 1
-    
-    # True 5-day trend using price boundaries
-    trend5  = (pm[-1] / np.maximum(pm[-6], 1e-9)) - 1
+    trend5  = rm[-5:].sum(axis=0)
     ret_d   = rm[-1]
-    
-    # Prior 20-day extremes (ending 6 days ago) to prevent overlap
-    high20_prior = pm[-window-6:-6].max(axis=0)
-    low20_prior  = pm[-window-6:-6].min(axis=0)
-    
-    in_bo5  = pm[-6:-1].max(axis=0) > high20_prior
-    in_bd5  = pm[-6:-1].min(axis=0) < low20_prior
-    
+    in_bo5  = pm[-6:-1].max(axis=0) > high20
+    in_bd5  = pm[-6:-1].min(axis=0) < low20
     pfl     = (p0 - low20) / np.maximum(low20, 1e-9)
 
-    breakout   = (p0 > high20)
-    breakdown  = (p0 < low20)
-    
+    breakout   = (p0 > high20) & (p1 <= high20)
+    breakdown  = (p0 < low20)  & (p1 >= low20)
     contd_bo   = in_bo5 & (trend5 > 0) & ~breakout
     contd_sh   = in_bd5 & (trend5 < 0) & ~breakdown
     bot_bounce = (pfl < 0.05) & (p0 > p1)
@@ -178,25 +151,19 @@ def compute_setups(pm, rm, window=20):
     return pd.DataFrame({
         'Setup': ['Bottom Bounce','Contd. Breakout','Episodic Pivot',
                   'Contd. Short', 'Breakdown',      'Backside Short'],
-        'Count': [
-             int(bot_bounce.sum()),
-             int(contd_bo.sum()),
-             int(epivot.sum()),
-            -int(contd_sh.sum()),
-            -int(breakdown.sum()),
-            -int(backside.sum()),
-        ]
+        'Count': [int(bot_bounce.sum()), int(contd_bo.sum()), int(epivot.sum()),
+                  -int(contd_sh.sum()), -int(breakdown.sum()), -int(backside.sum())]
     })
 
 df_setups = compute_setups(price_all, ret_all)
 
 
-# ── 4d · Breadth Time Series ──────────────────────────────────────────────────
-DISPLAY  = 60
-d_dates  = dates_all[-DISPLAY:]
-d_ret    = ret_all[-DISPLAY:]   # (60, N_COINS)
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4d — BREADTH TIME SERIES
+# ═══════════════════════════════════════════════════════════════════════════════
+d_dates = dates_all[-DISPLAY:]
+d_ret   = ret_all[-DISPLAY:]
 
-# PRIMARY
 up5_p = (d_ret[:, primary_idx] >  0.05).sum(axis=1).astype(float)
 dn5_p = (d_ret[:, primary_idx] < -0.05).sum(axis=1).astype(float)
 
@@ -212,41 +179,33 @@ ratio_2d    = rolling_ratio(up5_p, dn5_p, 2)
 ratio_5d    = rolling_ratio(up5_p, dn5_p, 5)
 osc_primary = up5_p - dn5_p
 
-# SECONDARY (Fully Vectorized)
-pre_crash_wk = np.array([
-    (price_all[i] / price_all[i-5]) - 1
-    for i in range(5, 37)
-])
+pre_crash_wk      = np.array([(price_all[i] / price_all[i-5]) - 1 for i in range(5, 37)])
 coin_weekly_sigma = pre_crash_wk.std(axis=0)
 
-pm_idx_start = LOOKBACK - DISPLAY
-# 60x289 matrix of rolling 5-day returns
-w_ret_matrix = (price_all[pm_idx_start:] / price_all[pm_idx_start-5 : LOOKBACK-5]) - 1
+osc_secondary = np.zeros(DISPLAY)
+for d in range(DISPLAY):
+    pm_idx = (LOOKBACK - DISPLAY) + d
+    if pm_idx >= 5:
+        w_ret = (price_all[pm_idx] / price_all[pm_idx-5]) - 1
+        osc_secondary[d] = ((w_ret > coin_weekly_sigma).sum()
+                           - (w_ret < -coin_weekly_sigma).sum()) / N_COINS * 100
 
-up_1s_arr = (w_ret_matrix > coin_weekly_sigma).sum(axis=1)
-dn_1s_arr = (w_ret_matrix < -coin_weekly_sigma).sum(axis=1)
-osc_secondary = (up_1s_arr - dn_1s_arr) / N_COINS * 100
-
-df_ts = pd.DataFrame({
-    'Date':          d_dates,
-    '2_day':         ratio_2d,
-    '5_day':         ratio_5d,
-    'Osc_Primary':   osc_primary,
-    'Osc_Secondary': osc_secondary,
-})
+df_ts = pd.DataFrame({'Date': d_dates, '2_day': ratio_2d, '5_day': ratio_5d,
+                      'Osc_Primary': osc_primary, 'Osc_Secondary': osc_secondary})
 
 
-# ── 4e · Calendar Heatmap ─────────────────────────────────────────────────────
-daily_median = np.median(ret_all, axis=1)  # (LOOKBACK,)
-
-year       = _today.year
-today_date = _today.date()
-year_dates = pd.date_range(f'{year}-01-01', f'{year}-12-31')
-first_mon  = year_dates[0] - timedelta(days=year_dates[0].dayofweek)
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4e — CALENDAR HEATMAP
+# ═══════════════════════════════════════════════════════════════════════════════
+daily_median = np.median(ret_all, axis=1)
+year         = _today.year
+today_date   = _today.date()
+year_dates   = pd.date_range(f'{year}-01-01', f'{year}-12-31')
+first_mon    = year_dates[0] - timedelta(days=year_dates[0].dayofweek)
 
 cal_rows = []
 for yr_d in year_dates:
-    days_ago = (today_date - yr_d.date()).days
+    days_ago  = (today_date - yr_d.date()).days
     is_future = days_ago < 0
     if 0 <= days_ago < LOOKBACK:
         val = float(daily_median[LOOKBACK - 1 - days_ago])
@@ -254,32 +213,155 @@ for yr_d in year_dates:
         val = float(np.random.normal(0, 0.008))
     else:
         val = np.nan
-    cal_rows.append({
-        'day':      yr_d.day,
-        'dow':      yr_d.dayofweek,
-        'month':    yr_d.month,
-        'week_col': (yr_d.date() - first_mon.date()).days // 7,
-        'val':      val,
-        'future':   is_future,
-    })
+    cal_rows.append({'day': yr_d.day, 'dow': yr_d.dayofweek, 'month': yr_d.month,
+                     'week_col': (yr_d.date() - first_mon.date()).days // 7,
+                     'val': val, 'future': is_future})
 df_cal = pd.DataFrame(cal_rows)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4f — TREND BLOCK  (BTC / ETH / TOTAL3 vs 20d / 50d / 200d SMA)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Separate seed so new section doesn't shift any existing chart values.
+# 260 days of history gives enough runway for the 200d SMA.
+LONG_LB = 260
+np.random.seed(_today.day + 77)
+
+def build_long_factor(n):
+    """
+    Richer regime history for the long lookback.
+    Crash/surge are anchored at the same real-world dates as the short matrix.
+    crash_start = n - 52 days before today (Jan 25), duration 15 days.
+    """
+    cs = n - 52
+    ce = cs + 15
+    boundaries = [
+        (int(n * 0.20), +0.007, 0.013),   # early bull run
+        (int(n * 0.38), +0.001, 0.017),   # distribution / topping
+        (int(n * 0.52), -0.004, 0.016),   # mild bear
+        (cs,            -0.001, 0.014),   # pre-crash chop
+        (ce,            -0.025, 0.029),   # CRASH
+        (ce + 23,       +0.009, 0.018),   # recovery
+        (ce + 32,       +0.002, 0.021),   # chop
+        (n - 1,         +0.030, 0.019),   # surge
+    ]
+    f, i = np.zeros(n), 0
+    for end, mu, sigma in boundaries:
+        end = min(int(end), n - 1)
+        while i < end:
+            f[i] = np.random.normal(mu, sigma)
+            i += 1
+    f[-1] = 0.085
+    return f
+
+f_long  = build_long_factor(LONG_LB)
+
+# BTC  = market proxy (beta 1.0, minimal noise — represents pure market beta)
+# ETH  = market * 1.05, slightly higher beta (tracks BTC but more volatile)
+# TOTAL3 = alts ex-BTC/ETH proxy (beta 0.90, more idio dispersion)
+btc_ret = f_long * 1.00 + np.random.normal(0, 0.003, LONG_LB)
+eth_ret = f_long * 1.05 + np.random.normal(0, 0.007, LONG_LB)
+tot_ret = f_long * 0.90 + np.random.normal(0, 0.006, LONG_LB)
+
+btc_px  = np.cumprod(1 + btc_ret)
+eth_px  = np.cumprod(1 + eth_ret)
+tot_px  = np.cumprod(1 + tot_ret)
+
+def sma(px, w):
+    """Simple moving average of the last w prices."""
+    return float(px[-w:].mean())
+
+def ma_vs(px, w):
+    """Return (pct_diff_string, hex_color) of current price vs SMA(w)."""
+    ma = sma(px, w)
+    r  = px[-1] / ma - 1
+    s  = f'+{r*100:.1f}%' if r >= 0 else f'{r*100:.1f}%'
+    if   r >  0.015: c = COLOR_POS
+    elif r < -0.015: c = COLOR_NEG
+    else:            c = '#E8E060'   # at / near MA
+    return s, c
+
+def regime(px):
+    """
+    Classify market structure from MA alignment.
+      Bull       — price > 50d AND 50d > 200d  (golden cross territory)
+      Recovery   — price > 50d AND 50d < 200d  (bounced but still under 200d)
+      Correction — price < 50d AND price > 200d (pulling back in uptrend)
+      Bear       — price < 50d AND price < 200d (death cross territory)
+    """
+    p    = px[-1]
+    m50  = sma(px, 50)
+    m200 = sma(px, 200)
+    if   p > m50 and m50 > m200: return 'Bull',       '#4CAF50'
+    elif p > m50:                 return 'Recovery',   '#E8E060'
+    elif p > m200:                return 'Correction', COLOR_NEG
+    else:                         return 'Bear',       '#cc3333'
+
+trend_data = []
+for label, px in [('BTC', btc_px), ('ETH', eth_px), ('TOTAL3', tot_px)]:
+    v20, c20   = ma_vs(px, 20)
+    v50, c50   = ma_vs(px, 50)
+    v200, c200 = ma_vs(px, 200)
+    reg, rc    = regime(px)
+    trend_data.append({'name': label,
+                       'vs20':  (v20, c20),  'vs50': (v50, c50),
+                       'vs200': (v200, c200), 'regime': (reg, rc)})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4g — MA BREADTH  (% of 289 coins above 20d / 50d / 200d SMA, 60-day history)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Build a full (260, 289) coin price matrix using the long market factor.
+# The per-coin betas and idio vols match the short matrix;
+# sector drift is extended backwards with matching stats.
+sd_long = {}
+for s in SECTORS:
+    prefix       = np.random.normal(0, 0.003, LONG_LB - LOOKBACK)
+    sd_long[s]   = np.concatenate([prefix, sector_drift[s]])
+
+px_long = np.ones((LONG_LB, N_COINS))
+_tmp_ret = np.zeros((LONG_LB, N_COINS))
+for c in range(N_COINS):
+    sec         = coin_sectors[c]
+    idio        = np.random.normal(0, coin_idio_vol[c], LONG_LB)
+    _tmp_ret[:, c] = coin_betas[c] * f_long + sd_long[sec] + idio
+px_long = np.cumprod(1 + _tmp_ret, axis=0)   # (260, 289)
+
+def pct_above_sma(px_matrix, n_display, window):
+    """
+    For each of the last n_display days, compute:
+        % of coins whose current price > their own trailing SMA(window)
+    Returns array of length n_display (values 0–100).
+    """
+    n    = px_matrix.shape[0]
+    result = np.full(n_display, np.nan)
+    for d in range(n_display):
+        day_idx = n - n_display + d
+        if day_idx < window:
+            continue
+        curr_px = px_matrix[day_idx]                         # (N_COINS,)
+        ma_px   = px_matrix[day_idx - window + 1: day_idx + 1].mean(axis=0)
+        result[d] = (curr_px > ma_px).mean() * 100
+    return result
+
+pct_20  = pct_above_sma(px_long, DISPLAY, 20)
+pct_50  = pct_above_sma(px_long, DISPLAY, 50)
+pct_200 = pct_above_sma(px_long, DISPLAY, 200)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5 — LAYOUT HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 def clean(fig, height=350):
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=20, b=0), height=height,
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(size=10),
-    )
+    fig.update_layout(margin=dict(l=0, r=0, t=20, b=0), height=height,
+                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                      font=dict(size=10))
     return fig
 
 def bar_v(df, x_col, y_col, title):
     colors = [COLOR_NEG if '-' in str(x) else COLOR_POS for x in df[x_col]]
-    fig = go.Figure(go.Bar(x=df[x_col], y=df[y_col],
-                           marker_color=colors, text=df[y_col], textposition='outside'))
+    fig = go.Figure(go.Bar(x=df[x_col], y=df[y_col], marker_color=colors,
+                           text=df[y_col], textposition='outside'))
     fig.update_yaxes(range=[0, max(df[y_col].max() * 1.3, 1)])
     st.markdown(f"<p style='text-align:center;font-weight:bold;'>{title}</p>",
                 unsafe_allow_html=True)
@@ -296,6 +378,37 @@ def bar_h(df, x_col, y_col, title, abs_text=False):
                 unsafe_allow_html=True)
     st.plotly_chart(clean(fig), use_container_width=True, config={'displayModeBar': False})
 
+def trend_table_html(data):
+    """Compact HTML table for the Structure block."""
+    def td(v, c, bold=False):
+        fw = 'bold' if bold else 'normal'
+        return f'<td style="padding:5px 14px;color:{c};font-weight:{fw};">{v}</td>'
+
+    header = '''
+    <tr style="border-bottom:1px solid #dddddd;">
+        <th style="padding:5px 14px;text-align:left;color:#888;font-weight:normal;">Asset</th>
+        <th style="padding:5px 14px;text-align:left;color:#888;font-weight:normal;">vs 20d SMA</th>
+        <th style="padding:5px 14px;text-align:left;color:#888;font-weight:normal;">vs 50d SMA</th>
+        <th style="padding:5px 14px;text-align:left;color:#888;font-weight:normal;">vs 200d SMA</th>
+        <th style="padding:5px 14px;text-align:left;color:#888;font-weight:normal;">Regime</th>
+    </tr>'''
+
+    rows = ''
+    for d in data:
+        rows += f'''<tr>
+            {td(d["name"], "inherit", bold=True)}
+            {td(d["vs20"][0],   d["vs20"][1])}
+            {td(d["vs50"][0],   d["vs50"][1])}
+            {td(d["vs200"][0],  d["vs200"][1])}
+            {td(d["regime"][0], d["regime"][1], bold=True)}
+        </tr>'''
+
+    return f'''
+    <table style="width:auto;border-collapse:collapse;font-size:13px;margin-top:4px;">
+        <thead>{header}</thead>
+        <tbody>{rows}</tbody>
+    </table>'''
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6 — UI
@@ -305,16 +418,23 @@ c1.markdown("## Market Monitor")
 c2.markdown(f"#### {_today.strftime('%Y-%m-%d')}")
 st.divider()
 
-# ── Row 1 ─────────────────────────────────────────────────────────────────────
+# ── Row 1 · Returns / Z-Scores / Setups ──────────────────────────────────────
 r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
 with r1c1: bar_v(df_p1d,    'Bin',     'Count',  'P1D Returns')
 with r1c2: bar_v(df_p1w,    'Bin',     'Count',  'P1W Returns')
 with r1c3: bar_h(df_zp1d,   'Z-Score', 'Sector', 'Sector Z-Scores P1D')
 with r1c4: bar_h(df_zp1w,   'Z-Score', 'Sector', 'Sector Z-Scores P1W')
 with r1c5: bar_h(df_setups, 'Count',   'Setup',  'Setups P1W', abs_text=True)
+
 st.write("")
 
-# ── Row 2 ─────────────────────────────────────────────────────────────────────
+# ── Row 1.5 · Structure — BTC / ETH / TOTAL3 vs MAs ─────────────────────────
+st.markdown("<p style='font-weight:bold;font-size:14px;'>Structure</p>",
+            unsafe_allow_html=True)
+st.markdown(trend_table_html(trend_data), unsafe_allow_html=True)
+st.write("")
+
+# ── Row 2 · Breadth Charts ───────────────────────────────────────────────────
 r2c1, r2c2, r2c3 = st.columns(3)
 
 with r2c1:
@@ -344,12 +464,54 @@ with r2c3:
 
 st.write("")
 
+# ── Row 2.5 · MA Breadth ─────────────────────────────────────────────────────
+# % of 289 coins trading above each MA — structural health indicator.
+# The three timeframes tell different stories:
+#   20d = short-term momentum (fast, responsive)
+#   50d = intermediate trend participation
+#   200d = long-term structural health (slow, sticky)
+# 50% is the key threshold: above = majority in uptrend, below = majority not.
+
+COLOR_50  = '#F5C842'   # 50d line
+COLOR_200 = '#B57EF5'   # 200d line
+
+r25c1, r25c2, r25c3 = st.columns(3)
+
+for col, series, color, title, ma_label in [
+    (r25c1, pct_20,  COLOR_POS, '% Coins Above 20d SMA', '20d'),
+    (r25c2, pct_50,  COLOR_50,  '% Coins Above 50d SMA', '50d'),
+    (r25c3, pct_200, COLOR_200, '% Coins Above 200d SMA', '200d'),
+]:
+    with col:
+        st.markdown(f"<p style='text-align:center;font-weight:bold;'>{title}</p>",
+                    unsafe_allow_html=True)
+        fig = go.Figure()
+        # Colour the area under the line: positive (>50) = blue, negative (<50) = orange
+        above = np.where(series >= 50, series, 50.0)
+        below = np.where(series <= 50, series, 50.0)
+        fig.add_trace(go.Scatter(
+            x=d_dates, y=above, fill='tozeroy', fillcolor=f'{COLOR_POS}44',
+            line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(
+            x=d_dates, y=below, fill='tozeroy', fillcolor=f'{COLOR_NEG}44',
+            line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        # Main line
+        fig.add_trace(go.Scatter(
+            x=d_dates, y=series, mode='lines', name=ma_label,
+            line=dict(color=color, width=1.8), showlegend=False))
+        # 50% reference line
+        fig.add_hline(y=50, line=dict(color='#aaaaaa', width=1, dash='dot'))
+        fig.update_yaxes(range=[0, 100], ticksuffix='%')
+        st.plotly_chart(clean(fig, 280), use_container_width=True,
+                        config={'displayModeBar': False})
+
+st.write("")
+
 # ── Row 3 · Calendar Heatmap ──────────────────────────────────────────────────
 st.markdown("<p style='text-align:center;font-weight:bold;'>Daily Performance Heatmap</p>",
             unsafe_allow_html=True)
 
 n_weeks  = int(df_cal['week_col'].max()) + 1
-
 z_past   = np.full((7, n_weeks), np.nan)
 z_future = np.full((7, n_weeks), np.nan)
 text_cal = np.full((7, n_weeks), '', dtype=object)
@@ -358,14 +520,13 @@ for _, row in df_cal.iterrows():
     r, c = int(row['dow']), int(row['week_col'])
     text_cal[r, c] = str(int(row['day']))
     if row['future']:
-        z_future[r, c] = 0.0          # constant → flat dark colour
+        z_future[r, c] = 0.0
     else:
         z_past[r, c] = row['val']
 
 MNAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 month_spans = df_cal.groupby('month')['week_col'].agg(['min','max'])
 
-# Month label annotations
 annotations = [
     dict(x=(sp['min']+sp['max'])/2, y=1.08, xref='x', yref='paper',
          text=f"<b>{MNAMES[m-1]}</b>", showarrow=False,
@@ -373,63 +534,34 @@ annotations = [
     for m, sp in month_spans.iterrows()
 ]
 
-# Step-stair month separators using SVG paths
 month_separators = []
-month_starts = df_cal.drop_duplicates(subset=['month'], keep='first')
-
-for _, row in month_starts.iterrows():
-    if row['month'] == df_cal['month'].min():
+for m, sp in month_spans.iterrows():
+    if m == df_cal['month'].min():
         continue
-    
-    w = row['week_col']
-    d = row['dow']
-
-    path = f"M {w - 0.5}, 6.5 L {w - 0.5}, {d - 0.5} L {w + 0.5}, {d - 0.5} L {w + 0.5}, -0.5"
-
+    x_sep = sp['min'] - 0.5
     month_separators.append(dict(
-        type='path',
-        path=path,
-        line=dict(color='#888888', width=2),
-    ))
+        type='line', x0=x_sep, x1=x_sep, y0=-0.5, y1=6.5,
+        xref='x', yref='y', line=dict(color='#555555', width=1.5)))
 
 fig_cal = go.Figure()
-
-# Layer 1: future cells
 fig_cal.add_trace(go.Heatmap(
-    z=z_future,
-    x=list(range(n_weeks)), y=list(range(7)),
-    text=text_cal, texttemplate="%{text}",
-    textfont={"size": 9, "color": "#666666"},
+    z=z_future, x=list(range(n_weeks)), y=list(range(7)),
+    text=text_cal, texttemplate="%{text}", textfont={"size": 9, "color": "#666666"},
     colorscale=[[0, '#2a2a2a'], [1, '#2a2a2a']],
-    showscale=False, xgap=3, ygap=3,
-    zmin=0, zmax=1, hoverinfo='none',
-))
-
-# Layer 2: past cells
+    showscale=False, xgap=3, ygap=3, zmin=0, zmax=1, hoverinfo='none'))
 fig_cal.add_trace(go.Heatmap(
-    z=z_past,
-    x=list(range(n_weeks)), y=list(range(7)),
-    text=text_cal, texttemplate="%{text}",
-    textfont={"size": 9, "color": "#111111"},
+    z=z_past, x=list(range(n_weeks)), y=list(range(7)),
+    text=text_cal, texttemplate="%{text}", textfont={"size": 9, "color": "#111111"},
     colorscale=[[0, COLOR_NEG], [0.5, '#e8e8e8'], [1, COLOR_POS]],
-    showscale=False, xgap=3, ygap=3,
-    zmin=-0.05, zmax=0.05, hoverinfo='none',
-))
+    showscale=False, xgap=3, ygap=3, zmin=-0.05, zmax=0.05, hoverinfo='none'))
 
 fig_cal.update_layout(
-    height=250,
-    margin=dict(l=35, r=10, t=50, b=10),
-    paper_bgcolor='#111111',
-    plot_bgcolor='#111111',
-    yaxis=dict(
-        ticktext=['M','T','W','T','F','S','S'],
-        tickvals=list(range(7)),
-        autorange='reversed', showgrid=False, zeroline=False,
-        tickfont=dict(size=10, color='#aaaaaa'),
-    ),
+    height=250, margin=dict(l=35, r=10, t=50, b=10),
+    paper_bgcolor='#111111', plot_bgcolor='#111111',
+    yaxis=dict(ticktext=['M','T','W','T','F','S','S'], tickvals=list(range(7)),
+               autorange='reversed', showgrid=False, zeroline=False,
+               tickfont=dict(size=10, color='#aaaaaa')),
     xaxis=dict(showticklabels=False, showgrid=False, zeroline=False,
                range=[-0.5, n_weeks - 0.5]),
-    annotations=annotations,
-    shapes=month_separators,
-)
+    annotations=annotations, shapes=month_separators)
 st.plotly_chart(fig_cal, use_container_width=True, config={'displayModeBar': False})
