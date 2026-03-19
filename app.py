@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import requests
 from datetime import datetime, timedelta
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -220,74 +221,64 @@ df_cal = pd.DataFrame(cal_rows)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4f — TREND BLOCK  (BTC / ETH / TOTAL3 vs 20d / 50d / 200d SMA)
+# 4f — TREND BLOCK  (BTC / ETH / SOL vs 20d / 50d / 200d SMA — live Binance)
 # ═══════════════════════════════════════════════════════════════════════════════
-# Separate seed so new section doesn't shift any existing chart values.
-# 260 days of history gives enough runway for the 200d SMA.
+# Binance public klines endpoint — no API key required.
+# 260 daily closes give enough runway for a clean 200d SMA.
+# TOTAL3 is a TradingView index with no direct exchange pair; replaced with SOL
+# as the most liquid large-cap alt proxy.
+# ttl=300 → refreshes at most every 5 minutes to avoid rate limits.
+
 LONG_LB = 260
-np.random.seed(_today.day + 77)
 
-def build_long_factor(n):
+@st.cache_data(ttl=300)
+def fetch_closes(symbol: str, limit: int = 260) -> np.ndarray | None:
     """
-    Richer regime history for the long lookback.
-    Crash/surge are anchored at the same real-world dates as the short matrix.
-    crash_start = n - 52 days before today (Jan 25), duration 15 days.
+    Fetch daily close prices from Binance spot klines.
+    Returns a float64 numpy array of length `limit` (oldest first),
+    or None if the request fails.
     """
-    cs = n - 52
-    ce = cs + 15
-    boundaries = [
-        (int(n * 0.20), +0.007, 0.013),   # early bull run
-        (int(n * 0.38), +0.001, 0.017),   # distribution / topping
-        (int(n * 0.52), -0.004, 0.016),   # mild bear
-        (cs,            -0.001, 0.014),   # pre-crash chop
-        (ce,            -0.025, 0.029),   # CRASH
-        (ce + 23,       +0.009, 0.018),   # recovery
-        (ce + 32,       +0.002, 0.021),   # chop
-        (n - 1,         +0.030, 0.019),   # surge
-    ]
-    f, i = np.zeros(n), 0
-    for end, mu, sigma in boundaries:
-        end = min(int(end), n - 1)
-        while i < end:
-            f[i] = np.random.normal(mu, sigma)
-            i += 1
-    f[-1] = 0.085
-    return f
+    url = "https://api.binance.com/api/v3/klines"
+    try:
+        r = requests.get(url, params={"symbol": symbol, "interval": "1d", "limit": limit},
+                         timeout=10)
+        r.raise_for_status()
+        closes = np.array([float(row[4]) for row in r.json()], dtype=np.float64)
+        return closes if len(closes) >= 200 else None
+    except Exception:
+        return None
 
-f_long  = build_long_factor(LONG_LB)
+btc_px = fetch_closes("BTCUSDT", LONG_LB)
+eth_px = fetch_closes("ETHUSDT", LONG_LB)
+sol_px = fetch_closes("SOLUSDT", LONG_LB)
 
-# BTC  = market proxy (beta 1.0, minimal noise — represents pure market beta)
-# ETH  = market * 1.05, slightly higher beta (tracks BTC but more volatile)
-# TOTAL3 = alts ex-BTC/ETH proxy (beta 0.90, more idio dispersion)
-btc_ret = f_long * 1.00 + np.random.normal(0, 0.003, LONG_LB)
-eth_ret = f_long * 1.05 + np.random.normal(0, 0.007, LONG_LB)
-tot_ret = f_long * 0.90 + np.random.normal(0, 0.006, LONG_LB)
+# Fallback: if any fetch fails, mark as unavailable (handled in render)
+_fetch_ok = {
+    "BTC":  btc_px is not None,
+    "ETH":  eth_px is not None,
+    "SOL":  sol_px is not None,
+}
 
-btc_px  = np.cumprod(1 + btc_ret)
-eth_px  = np.cumprod(1 + eth_ret)
-tot_px  = np.cumprod(1 + tot_ret)
-
-def sma(px, w):
-    """Simple moving average of the last w prices."""
+def sma(px: np.ndarray, w: int) -> float:
     return float(px[-w:].mean())
 
-def ma_vs(px, w):
-    """Return (pct_diff_string, hex_color) of current price vs SMA(w)."""
+def ma_vs(px: np.ndarray, w: int):
+    """(display_string, colour) of current price vs SMA(w)."""
     ma = sma(px, w)
     r  = px[-1] / ma - 1
     s  = f'+{r*100:.1f}%' if r >= 0 else f'{r*100:.1f}%'
     if   r >  0.015: c = COLOR_POS
     elif r < -0.015: c = COLOR_NEG
-    else:            c = '#E8E060'   # at / near MA
+    else:            c = '#E8E060'
     return s, c
 
-def regime(px):
+def regime(px: np.ndarray):
     """
-    Classify market structure from MA alignment.
-      Bull       — price > 50d AND 50d > 200d  (golden cross territory)
-      Recovery   — price > 50d AND 50d < 200d  (bounced but still under 200d)
-      Correction — price < 50d AND price > 200d (pulling back in uptrend)
-      Bear       — price < 50d AND price < 200d (death cross territory)
+    Regime from MA alignment:
+      Bull       — price > 50d AND 50d > 200d
+      Recovery   — price > 50d AND 50d < 200d  (bounced but below 200d)
+      Correction — price < 50d AND price > 200d
+      Bear       — price < 50d AND price < 200d
     """
     p    = px[-1]
     m50  = sma(px, 50)
@@ -298,33 +289,64 @@ def regime(px):
     else:                         return 'Bear',       '#cc3333'
 
 trend_data = []
-for label, px in [('BTC', btc_px), ('ETH', eth_px), ('TOTAL3', tot_px)]:
+for label, px in [('BTC', btc_px), ('ETH', eth_px), ('SOL', sol_px)]:
+    if px is None:
+        trend_data.append({'name': label,
+                           'vs20': ('N/A', '#888'), 'vs50': ('N/A', '#888'),
+                           'vs200': ('N/A', '#888'), 'regime': ('Unavailable', '#888')})
+        continue
     v20, c20   = ma_vs(px, 20)
     v50, c50   = ma_vs(px, 50)
     v200, c200 = ma_vs(px, 200)
     reg, rc    = regime(px)
     trend_data.append({'name': label,
-                       'vs20':  (v20, c20),  'vs50': (v50, c50),
+                       'vs20':  (v20, c20),  'vs50':  (v50, c50),
                        'vs200': (v200, c200), 'regime': (reg, rc)})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4g — MA BREADTH  (% of 289 coins above 20d / 50d / 200d SMA, 60-day history)
 # ═══════════════════════════════════════════════════════════════════════════════
-# Build a full (260, 289) coin price matrix using the long market factor.
-# The per-coin betas and idio vols match the short matrix;
-# sector drift is extended backwards with matching stats.
+# Build a full (260, 289) coin price matrix using the same regime factor logic
+# as the short matrix, extended backwards by (LONG_LB - LOOKBACK) days.
+# f_long_coins is independent of the live BTC/ETH fetch — this is the simulated
+# alt-coin universe and does not need real price data.
+np.random.seed(_today.day + 77)
+
+def _build_coin_long_factor(n):
+    cs = n - 52
+    ce = cs + 15
+    boundaries = [
+        (int(n * 0.20), +0.0012, 0.013),
+        (int(n * 0.38), +0.0001, 0.017),
+        (int(n * 0.52), -0.0012, 0.016),
+        (cs,            -0.0004, 0.014),
+        (ce,            -0.018,  0.029),
+        (ce + 23,       +0.002,  0.018),
+        (ce + 32,       +0.0008, 0.021),
+        (n - 1,         +0.004,  0.019),
+    ]
+    f, i = np.zeros(n), 0
+    for end, mu, sigma in boundaries:
+        end = min(int(end), n - 1)
+        while i < end:
+            f[i] = np.random.normal(mu, sigma)
+            i += 1
+    f[-1] = 0.085
+    return f
+
+f_long_coins = _build_coin_long_factor(LONG_LB)
+
 sd_long = {}
 for s in SECTORS:
-    prefix       = np.random.normal(0, 0.003, LONG_LB - LOOKBACK)
-    sd_long[s]   = np.concatenate([prefix, sector_drift[s]])
+    prefix     = np.random.normal(0, 0.003, LONG_LB - LOOKBACK)
+    sd_long[s] = np.concatenate([prefix, sector_drift[s]])
 
-px_long = np.ones((LONG_LB, N_COINS))
 _tmp_ret = np.zeros((LONG_LB, N_COINS))
 for c in range(N_COINS):
-    sec         = coin_sectors[c]
-    idio        = np.random.normal(0, coin_idio_vol[c], LONG_LB)
-    _tmp_ret[:, c] = coin_betas[c] * f_long + sd_long[sec] + idio
+    sec            = coin_sectors[c]
+    idio           = np.random.normal(0, coin_idio_vol[c], LONG_LB)
+    _tmp_ret[:, c] = coin_betas[c] * f_long_coins + sd_long[sec] + idio
 px_long = np.cumprod(1 + _tmp_ret, axis=0)   # (260, 289)
 
 def pct_above_sma(px_matrix, n_display, window):
