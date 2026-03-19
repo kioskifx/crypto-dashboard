@@ -121,22 +121,37 @@ def fetch_all_ohlcv(symbols: tuple, limit: int = 260) -> dict:
 with st.spinner("Fetching live market data…"):
     raw = fetch_all_ohlcv(tuple(ALL_SYMS), limit=LONG_LB)
 
-# Map symbol → sector, only for coins that fetched successfully
-fetched_syms    = [s for s in ALL_SYMS if s in raw]
+# ── Guard: surface a clear error if the network is unreachable ───────────────
+fetched_syms = [s for s in ALL_SYMS if s in raw]
+
+if len(fetched_syms) == 0:
+    st.error(
+        "**No data fetched.** All Binance requests failed.\n\n"
+        "This usually means the deployment environment blocks outbound HTTP. "
+        "If you are running on Streamlit Community Cloud, check that the app "
+        "has network access, or run locally with `streamlit run app.py`."
+    )
+    st.stop()
+
+if len(fetched_syms) < 10:
+    st.warning(
+        f"Only {len(fetched_syms)} of {len(ALL_SYMS)} symbols fetched. "
+        "Some charts may be unreliable. Check your network / Binance rate limits."
+    )
+
 coin_sector_arr = np.array([COIN_MAP[s] for s in fetched_syms])
 N_COINS         = len(fetched_syms)
 
-# Align all price arrays to the same length (use the minimum available)
-min_len  = min(len(raw[s]) for s in fetched_syms)
-LONG_LB  = min_len                          # actual history available
+# Align all price arrays to the same length (shortest series wins)
+min_len   = min(len(raw[s]) for s in fetched_syms)
+LONG_LB   = min_len
 
-# price_all: (LONG_LB, N_COINS), each column = one coin's daily closes
+# price_all: (LONG_LB, N_COINS) — each column is one coin's daily closes
 price_all = np.column_stack([raw[s][-LONG_LB:] for s in fetched_syms])
 
-# ret_all: daily log-return (ln(p_t / p_{t-1})), (LONG_LB-1, N_COINS)
-# Using log returns for numerical stability; all downstream math works the same.
-ret_all  = np.diff(np.log(price_all), axis=0)   # (LONG_LB-1, N_COINS)
-price_all = price_all[1:]                        # align: (LONG_LB-1, N_COINS)
+# ret_all: daily log-returns ln(p_t / p_{t-1}), shape (LONG_LB-1, N_COINS)
+ret_all   = np.diff(np.log(price_all), axis=0)
+price_all = price_all[1:]   # drop first row to align with ret_all
 LONG_LB  -= 1
 
 dates_all = np.array([_today - timedelta(days=x)
